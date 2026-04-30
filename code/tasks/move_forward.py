@@ -1,26 +1,12 @@
 """
 MoveForwardTask - Reward function for STAGE 1: General Completion.
-
-The level status (win=1 / death=2 / timeout=other) is NOT available during
-the steps - it is only known at the end of the episode. So we set the
-metric flags inside compute_reward() but the OFFICIAL final value of
-won/died should be read from `task.status` AFTER doEpisodes() returns.
-
-Metrics tracked:
-  - distance      : how far Mario walked (max x reached)
-  - kills         : enemies eliminated during the episode
-  - won_level     : True if Mario reached the flag (status == 1) at the end
-  - died          : True if Mario died (status == 2) at the end
-  - steps         : number of game ticks the episode lasted
 """
 
 import numpy as np
 import marioai
 
-
 # Enemy codes inside the level_scene grid
 ENEMY_CODES = {2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13}
-
 
 def count_enemies(scene):
     """Count how many cells of the 22x22 grid contain an enemy code."""
@@ -30,7 +16,6 @@ def count_enemies(scene):
     for code in ENEMY_CODES:
         count += int(np.sum(scene == code))
     return count
-
 
 class MoveForwardTask(marioai.Task):
     def __init__(self, *args, **kwargs):
@@ -46,6 +31,9 @@ class MoveForwardTask(marioai.Task):
         self.metric_distance = 0.0
         self.metric_kills = 0
         self.metric_steps = 0
+        
+        # NOVO: Contador para saber há quanto tempo o Mario não avança
+        self.stuck_counter = 0 
 
     def reset(self):
         """Called by the engine at the start of every new episode."""
@@ -53,12 +41,6 @@ class MoveForwardTask(marioai.Task):
         self._reset_metrics()
 
     def get_metrics(self):
-        """
-        Return a dictionary with all the metrics of the last episode.
-        IMPORTANT: won/died are read from self.status, which is set by the
-        engine ONLY after the episode ends. So call get_metrics() AFTER
-        doEpisodes() returns.
-        """
         return {
             "distance": self.metric_distance,
             "kills": self.metric_kills,
@@ -84,8 +66,21 @@ class MoveForwardTask(marioai.Task):
         if current_obs.mario_pos is not None and last_obs.mario_pos is not None:
             dx = current_obs.mario_pos[0] - last_obs.mario_pos[0]
             reward += dx
+            
             if current_obs.mario_pos[0] > self.metric_distance:
                 self.metric_distance = current_obs.mario_pos[0]
+
+            # NOVO: Lógica de penalização por ficar preso nas paredes/obstáculos
+            # Se o avanço for quase nulo ou negativo (andar para trás ou bater na parede)
+            if dx <= 0.1:
+                self.stuck_counter += 1
+            else:
+                self.stuck_counter = 0 # Reset ao contador mal ele consiga avançar
+
+            # Se o Mario estiver "encravado" há mais de 10 frames, aplicamos uma penalização
+            # Isto vai forçá-lo a explorar o salto para parar de sofrer esta penalização
+            if self.stuck_counter > 10:
+                reward -= 0.5
 
         # 2) Tick penalty so being idle is discouraged
         reward -= 0.05
@@ -96,10 +91,10 @@ class MoveForwardTask(marioai.Task):
         if enemies_before > enemies_now:
             killed = enemies_before - enemies_now
             self.metric_kills += killed
+            # NOVO: Faltava adicionar a recompensa por matar os inimigos!
+            reward += killed * 10.0 
 
-        # 4) Termination handling - status here is mostly 0 during the run,
-        #    but we still keep these checks for safety. The OFFICIAL win/death
-        #    is read from task.status after the episode ends (see get_metrics).
+        # 4) Termination handling
         if current_obs.status == 1:
             reward += 1000.0
         elif current_obs.status == 2:

@@ -1,12 +1,14 @@
 """
 Evolutionary Algorithm: (µ + λ) Evolution Strategy with elitism for the MLPAgent.
 
-ALTERAÇÕES v2 (relativamente à versão original do professor):
-  - SIGMA_MUT reduzido de 0.1 para 0.05 (mutação mais fina nas últimas gerações)
-  - MUTATION_PROB aumentado de 0.9 para 1.0 (todos os filhos sofrem mutação)
-  - Adaptive sigma: após geração 50, SIGMA_MUT é reduzido para 0.02 (exploração fina)
-  - Logging melhorado: mostra também tempo estimado restante
-  - CSV log mantido (compatível com o formato anterior)
+ALTERAÇÕES v3 (otimizadas via hyperparameter_search.py):
+  - MU reduzido de 50 para 30 (população menor converge melhor — confirmado no hypersearch)
+  - TOURNAMENT_K aumentado de 3 para 5 (pressão de seleção mais alta)
+  - GENERATIONS aumentado de 100 para 150 (mais gerações para aproveitar melhor config)
+  - SIGMA_MUT aumentado de 0.05 para 0.1 (mais consistente entre seeds)
+  - SIGMA_MUT_FINE ajustado de 0.02 para 0.05 (desce de 0.1 para 0.05 na gen 50)
+  - MUTATION_PROB = 1.0 mantido
+  - Adaptive sigma mantido: 0.1 até gen 50, depois 0.05
 
 Usage:
     python evolution.py <seed>
@@ -31,19 +33,21 @@ from evaluation import evaluate_population
 
 # ---------------------------------------------------------------------------
 # 1. Hyperparameters
+# OTIMIZADOS via hyperparameter_search.py (v3)
+# Melhor config encontrada: MU=30, LAMBDA=50, SIGMA=0.1→0.05, K=5
 # ---------------------------------------------------------------------------
-MU = 50              # population size (parents kept each generation)
-LAMBDA = 50          # number of offspring generated per generation
-GENERATIONS = 100    # number of generations
-TOURNAMENT_K = 3     # tournament size for parent selection
-CROSSOVER_PROB = 0.8 # probability of applying crossover
-MUTATION_PROB = 1.0  # ALTERADO: era 0.9, agora todos os filhos sofrem mutação
-SIGMA_INIT = 0.5     # std-dev of the initial random weights
-SIGMA_MUT = 0.05     # ALTERADO: era 0.1, mutação mais fina para convergência melhor
+MU = 30              # ALTERADO: era 50, população mais pequena converge melhor
+LAMBDA = 50          # mantido: mais offspring que pais favorece exploração
+GENERATIONS = 150    # ALTERADO: era 100, mais gerações para aproveitar melhor config
+TOURNAMENT_K = 5     # ALTERADO: era 3, pressão de seleção mais alta
+CROSSOVER_PROB = 0.8 # mantido
+MUTATION_PROB = 1.0  # mantido: todos os filhos sofrem mutação
+SIGMA_INIT = 0.5     # mantido
+SIGMA_MUT = 0.1      # ALTERADO: era 0.05, mais consistente entre seeds
 
 # Adaptive sigma: após esta geração, usa sigma mais pequeno para refinamento
 ADAPTIVE_SIGMA_GEN = 50
-SIGMA_MUT_FINE = 0.02  # NOVO: sigma usado após geração ADAPTIVE_SIGMA_GEN
+SIGMA_MUT_FINE = 0.05  # ALTERADO: era 0.02, desce de 0.1 para 0.05 na gen 50
 
 
 # ---------------------------------------------------------------------------

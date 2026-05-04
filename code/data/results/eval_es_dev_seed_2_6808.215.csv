@@ -1,0 +1,11 @@
+difficulty,level_seed,fitness,distance,kills,won,died,timeout,final_status,steps
+0,0,1448.2948000000322,379.8724,0,False,False,True,0,750
+0,1,7485.1000000000095,1883.6,0,False,False,True,0,323
+0,2,3741.346595507813,944.93665,0,False,False,True,0,129
+0,3,4775.749999999891,1211.6,0,False,False,True,0,750
+0,4,5480.049199999898,1387.7496,0,False,False,True,0,750
+0,5,4651.086033203015,1180.134,0,False,False,True,0,750
+0,6,1446.5500000000316,379.0,0,False,False,True,0,750
+0,7,6055.750000000153,1531.6,0,False,False,True,0,750
+0,8,3942.5499999998838,1003.0,0,False,False,True,0,750
+0,9,8102.5499999999,2043.0,0,False,False,True,0,750

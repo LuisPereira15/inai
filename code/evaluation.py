@@ -1,120 +1,183 @@
+"""
+evaluation.py — Motor de avaliação paralela para a ES do Mario.
+
+Mudanças principais vs. versão anterior:
+  - Multi-seed evaluation: cada indivíduo é avaliado em N_TRAIN_SEEDS níveis
+    distintos (seeds fixas, iguais para todos os indivíduos) e a fitness
+    final é a MÉDIA. Reduz drasticamente o overfitting a um único layout.
+  - Sem curriculum durante o treino: o curriculum (subir difficulty se WIN)
+    gerava ruído porque desperdiçava avaliações em níveis difíceis antes de
+    o agente saber completar os fáceis. Volta na Phase 2.
+  - N_PROCESSES e porta base configuráveis: em DEV pode querer menos workers.
+"""
+
 import marioai
-from multiprocessing import Pool, Manager, current_process
-from itertools import cycle
+from multiprocessing import Pool
 from agents import MLPAgent, CodeAgent
 from tasks import MoveForwardTask, HunterTask
 import numpy as np
 
-# Variable that configures the number of parallel processes
-N_PROCESSES = 5
-# Task Definition
-TASK_TO_SOLVE = MoveForwardTask#HunterTask
+# ---------------------------------------------------------------------------
+# Configuração global
+# ---------------------------------------------------------------------------
+N_PROCESSES   = 5                     # workers paralelos (= portas docker)
+TASK_TO_SOLVE = MoveForwardTask       # trocar para HunterTask na Stage 2
 
+# Sementes de treino: FIXAS e iguais para todos os indivíduos.
+# Escolhidas para cobrir layouts variados em difficulty=0.
+# Em DEV usam-se as 2 primeiras; em FULL as 3 primeiras.
+# O evolution.py controla qual subconjunto usar via TRAIN_SEEDS.
+# Pool de 20 seeds de treino.
+# A cada geração sorteia-se N_TRAIN_SEEDS deste pool SEM repetição.
+# Evita memorização de layouts → força generalização real.
+SEED_POOL = list(range(0, 20))
+ALL_TRAIN_SEEDS = SEED_POOL   # compatibilidade com código existente
 
-
+# N_TRAIN_SEEDS é lido do evolution.py em runtime via eval_module.N_TRAIN_SEEDS
+N_TRAIN_SEEDS = 3
 
 port_list = [4242 + i for i in range(N_PROCESSES)]
-def evaluate_agent(agent, task, episodes=1):
+
+
+# ---------------------------------------------------------------------------
+# Avaliação de um único episódio
+# ---------------------------------------------------------------------------
+def _run_one_train_episode(agent, task, exp, level_seed: int) -> float:
     """
-    Evaluates the agent on the task for a given number of episodes.
-    Returns the average fitness (reward).
+    Corre um episódio em difficulty=0, level_seed fixo.
+    Devolve task.cum_reward como fitness do episódio.
     """
+    task.level_difficulty  = 0
+    task.env.level_type    = 0
+    task.env.level_seed    = level_seed
+    exp.doEpisodes(1)
+    return task.cum_reward
+
+
+def evaluate_agent(agent, task, train_seeds=None) -> float:
+    """
+    Avalia o agente em cada seed de treino e devolve a média.
+
+    Não há curriculum aqui — cada episódio é sempre difficulty=0.
+    Isso dá um sinal de fitness estável e comparável entre indivíduos.
+    """
+    if train_seeds is None:
+        train_seeds = list(np.random.choice(SEED_POOL, N_TRAIN_SEEDS, replace=False))
+
     exp = marioai.Experiment(task, agent)
-    # Speed up simulation for training
-    exp.max_fps = -1 
-    
-    total_reward = 0
+    exp.max_fps = -1   # máxima velocidade durante treino
 
-    for _ in range(episodes):
-        episode_reward = 0
-        task.level_difficulty = 0
-        # Try up to 3 levels of increasing difficulty
-        for _ in range(3):
-            rewards = exp.doEpisodes(1)
-            episode_reward += task.cum_reward
-            
-            if task.status == 1: # WIN
-                task.level_difficulty += 1
-            else:
-                break
-        
-                
-        total_reward += episode_reward
-        
-    
-    return total_reward / episodes
+    total = 0.0
+    for seed in train_seeds:
+        total += _run_one_train_episode(agent, task, exp, seed)
+
+    return total / len(train_seeds)
 
 
-# --- GLOBAL VARIABLES FOR WORKER PROCESSES ---
-# These exist independently inside EACH worker process.
-worker_task = None 
+# ---------------------------------------------------------------------------
+# Variáveis globais dos workers (uma por processo)
+# ---------------------------------------------------------------------------
+worker_task  = None
 worker_agent = None
+worker_seeds = None   # subconjunto de ALL_TRAIN_SEEDS para este worker
 
-def init_worker(agent_class):
+
+def init_worker(agent_class, train_seeds=None):
     """
-    This runs ONCE when each worker process starts.
+    Inicialização do processo worker — corre UMA VEZ por worker.
+    Cria a ligação ao servidor Mario e o agente persistente.
     """
-    global worker_agent, worker_task
-    
-    # Each worker needs to pick a port. Since we have 10 workers 
-    # and 10 ports, we can use a trick to assign them.
+    global worker_agent, worker_task, worker_seeds
     import multiprocessing
-    # Get the index of the current worker (0 through 9)
-    # Note: This is a hacky way to get a unique index; 
-    # alternatively, use a shared Counter/Queue.
+
+    worker_seeds = train_seeds if train_seeds is not None \
+                   else list(np.random.choice(SEED_POOL, N_TRAIN_SEEDS, replace=False))
+
     worker_idx = int(multiprocessing.current_process().name.split('-')[-1]) - 1
     port = port_list[worker_idx % len(port_list)]
-    
-    #print(f"Worker initialized: Connecting once to port {port}...")
 
     worker_agent = agent_class()
-    if worker_task is None:
-        worker_task = TASK_TO_SOLVE(visualization=False, port=port, init_mario_mode=0)
+    worker_task  = TASK_TO_SOLVE(visualization=False, port=port,
+                                 init_mario_mode=0)
 
 
-def evaluate_individual(ind_info):
+def evaluate_individual(ind_info) -> float:
     """
-    This runs for every individual in the population.
-    It uses the GLOBALLY cached worker_task.
+    Avalia um único indivíduo — chamado pelo pool.map para cada membro
+    da população. Usa a task e o agente globais do worker.
     """
-    global worker_task, worker_agent
-    
-    # 1. Update the persistent agent with the new DNA
+    global worker_task, worker_agent, worker_seeds
+
+    # Atualizar o agente com o genotipo
     if isinstance(worker_agent, MLPAgent):
         worker_agent.set_param_vector(ind_info)
     elif isinstance(worker_agent, CodeAgent):
         worker_agent.action_function = ind_info
 
-    
-    # 2. Run evaluation using the EXISTING connection
-    # No "with", no "connect", just use the persistent object.
     try:
-        reward = evaluate_agent(worker_agent, worker_task)
+        reward = evaluate_agent(worker_agent, worker_task, worker_seeds)
     except Exception as e:
-        print(f"Error in worker: {e}")
-        reward = 0
-        
+        print(f"[Worker error] {e}")
+        reward = 0.0
+
     return reward
 
-def evaluate(agent_class, ind_info):
-    global worker_agent, worker_task
+
+# ---------------------------------------------------------------------------
+# Interface pública: avalia toda a população em paralelo
+# ---------------------------------------------------------------------------
+def evaluate_population(agent_class, population, train_seeds=None) -> np.ndarray:
+    """
+    Avalia toda a população em paralelo com N_PROCESSES workers.
+
+    Parameters
+    ----------
+    agent_class  : classe do agente (MLPAgent ou CodeAgent)
+    population   : lista de vetores de parâmetros (genótipos)
+    train_seeds  : subconjunto de seeds a usar (None → ALL_TRAIN_SEEDS[:N_TRAIN_SEEDS])
+
+    Returns
+    -------
+    np.ndarray de fitness com len == len(population)
+    """
+    # Se não passadas seeds explícitas → sortear N_TRAIN_SEEDS do SEED_POOL
+    if train_seeds is None:
+        seeds = list(np.random.choice(SEED_POOL, N_TRAIN_SEEDS, replace=False))
+        print(f"  [Seeds desta geração] {seeds}")
+    else:
+        seeds = train_seeds
+
+    with Pool(
+        processes=N_PROCESSES,
+        initializer=init_worker,
+        initargs=(agent_class, seeds)
+    ) as pool:
+        rewards_list = pool.map(evaluate_individual, population)
+
+    return np.array(rewards_list)
+
+
+# ---------------------------------------------------------------------------
+# Utilitário standalone (para testes fora da ES)
+# ---------------------------------------------------------------------------
+def evaluate(agent_class, ind_info, train_seeds=None) -> float:
+    """Avalia um único indivíduo sem multiprocessing — útil para debug."""
+    global worker_agent, worker_task, worker_seeds
+
+    seeds = train_seeds if train_seeds is not None \
+            else list(np.random.choice(SEED_POOL, N_TRAIN_SEEDS, replace=False))
+
     if worker_agent is None:
         worker_agent = agent_class()
     if worker_task is None:
-        worker_task = TASK_TO_SOLVE(visualization = False, port=port_list[0])
-    return evaluate_individual(ind_info)
+        worker_task = TASK_TO_SOLVE(visualization=False,
+                                    port=port_list[0],
+                                    init_mario_mode=0)
+    worker_seeds = seeds
 
+    if isinstance(worker_agent, MLPAgent):
+        worker_agent.set_param_vector(ind_info)
+    elif isinstance(worker_agent, CodeAgent):
+        worker_agent.action_function = ind_info
 
-def evaluate_population(agent, population):
-    
-    # Match processes to tasks to avoid one worker being idle or double-booking
-    n_processes = N_PROCESSES
-
-    # We pass 'tasks' to the initializer, so every worker picks one at startup
-    with Pool(processes=n_processes, initializer=init_worker, initargs=(agent,)) as pool:
-        # We only map the POPULATION. The tasks are already fixed in the workers.
-        rewards_list = pool.map(evaluate_individual, population)
-    
-    worker_task = None
-        
-    return np.array(rewards_list)
+    return evaluate_agent(worker_agent, worker_task, seeds)

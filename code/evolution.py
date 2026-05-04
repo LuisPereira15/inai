@@ -1,250 +1,292 @@
+"""
+evolution.py — μ+λ Evolution Strategy para Super Mario (MLP NeuroEvolution)
+
+Versão 4 — run limpa com todas as correcções:
+  - MLPAgent agora tem 107 inputs (+ vel_x, vel_y)
+  - MoveForwardTask com stuck penalty
+  - Seeds rotativas do pool [0..19] a cada geração
+  - MU=20, LAMBDA=40 em DEV (mais diversidade para espaço de fitness mais rico)
+  - GENERATIONS=100 em DEV
+
+Uso:
+    python evolution.py 1           # DEV  (~1h)
+    python evolution.py 1 --full    # FULL (500 gens, entrega final)
+"""
+
 import sys
 import time
 import pickle as pkl
 import csv
+from collections import deque
 from copy import deepcopy
 from pathlib import Path
 from contextlib import contextmanager
 
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from agents.mlp_agent import MLPAgent
+import evaluation as eval_module
 from evaluation import evaluate_population
 
 
 # ---------------------------------------------------------------------------
-# 1. Hyperparameters
+# 1. Modo de execução
 # ---------------------------------------------------------------------------
-MU = 15              # REDUZIDO: Apenas a elite absoluta sobrevive!
-LAMBDA = 50          # number of offspring generated per generation
-GENERATIONS = 500    # number of generations
-TOURNAMENT_K = 2     # tournament size for parent selection
-CROSSOVER_PROB = 0.7 # probability of applying crossover
-MUTATION_PROB = 1.0  # Todos os filhos sofrem mutação
-SIGMA_INIT = 0.5     # std-dev of the initial random weights
+MODE = "FULL" if ("--full" in sys.argv) else "DEV"
 
-# Escada de Mutação (Step Decay de 125 em 125 gerações)
-SIGMA_STAGE_1 = 0.5  # Gen 0 a 124 (Exploração Máxima)
-SIGMA_STAGE_2 = 0.35  # Gen 125 a 249 (Exploração Moderada)
-SIGMA_STAGE_3 = 0.20  # Gen 250 a 374 (Afinação Inicial)
-SIGMA_STAGE_4 = 0.05  # Gen 375 a 499 (Refinamento Cirúrgico)
+if MODE == "DEV":
+    MU            = 20    # aumentado: espaço mais rico precisa mais diversidade
+    LAMBDA        = 40
+    GENERATIONS   = 100
+    N_TRAIN_SEEDS = 3     # sorteadas do pool a cada geração
+else:
+    MU            = 15
+    LAMBDA        = 50
+    GENERATIONS   = 500
+    N_TRAIN_SEEDS = 3
+
+eval_module.N_TRAIN_SEEDS = N_TRAIN_SEEDS
+TRAIN_SEEDS = None   # None → evaluation.py sorteia do SEED_POOL a cada geração
 
 
 # ---------------------------------------------------------------------------
-# 2. Small utilities
+# 2. Hiperparâmetros
+# ---------------------------------------------------------------------------
+N_ELITES         = 1
+SIGMA_INIT       = 0.5
+SIGMA_MIN        = 0.01
+SIGMA_MAX        = 1.0
+ADAPT_FACTOR     = 1.22
+SUCCESS_TARGET   = 0.2
+WINDOW           = 10
+STAGNATION_LIMIT = 10
+SIGMA_RESTART    = 0.3
+TOURNAMENT_K     = 2
+CROSSOVER_PROB   = 0.7
+MUTATION_PROB    = 1.0
+
+
+# ---------------------------------------------------------------------------
+# 3. Utilitários
 # ---------------------------------------------------------------------------
 @contextmanager
 def timer_context(label):
-    start = time.perf_counter()
+    t0 = time.perf_counter()
     try:
         yield
     finally:
-        end = time.perf_counter()
-        print(f"[{label}] Elapsed time: {end - start:.4f} seconds")
+        print(f"  [{label}] {time.perf_counter() - t0:.1f}s")
 
 
-def make_evolution_plot(best, mean, title, save=False):
-    plt.plot(best, label='Best Reward')
-    plt.plot(mean, label='Mean Reward')
-    plt.xlabel('Generation')
-    plt.ylabel('Reward')
-    plt.title(title)
-    plt.legend()
-    plt.draw()
+def make_evolution_plot(best_h, mean_h, sigma_h, title, save=False):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    ax1.plot(best_h, label="Best (gen)", color="tab:blue")
+    ax1.plot(mean_h, label="Mean (gen)", color="tab:orange", alpha=0.7)
+    ax1.set_ylabel("Fitness")
+    ax1.set_title(title)
+    ax1.legend()
+    ax2.plot(sigma_h, label="Sigma", color="tab:green")
+    ax2.set_ylabel("Sigma")
+    ax2.set_xlabel("Generation")
+    ax2.legend()
+    plt.tight_layout()
     if save:
-        plt.savefig(f'{title}.png')
-    plt.pause(0.01)
-    plt.clf()
+        plt.savefig(f"{title}.png", dpi=150)
+        print(f"  Plot: {title}.png")
+    plt.close()
 
 
 # ---------------------------------------------------------------------------
-# 3. Evolutionary operators
+# 4. Operadores evolutivos
 # ---------------------------------------------------------------------------
-def init_individual(num_params):
-    return np.random.randn(num_params).astype(np.float32) * SIGMA_INIT
+def init_individual(n):
+    return (np.random.randn(n) * SIGMA_INIT).astype(np.float32)
 
+def init_population(size, n):
+    return [init_individual(n) for _ in range(size)]
 
-def init_population(pop_size, num_params):
-    return [init_individual(num_params) for _ in range(pop_size)]
+def tournament_selection(pop, fits):
+    idx = np.random.randint(0, len(pop), size=TOURNAMENT_K)
+    return deepcopy(pop[int(idx[np.argmax(fits[idx])])])
 
+def blx_alpha_crossover(p1, p2, alpha=0.5):
+    lo  = np.minimum(p1, p2)
+    hi  = np.maximum(p1, p2)
+    ext = (hi - lo) * alpha
+    return np.random.uniform(lo - ext, hi + ext).astype(np.float32)
 
-def tournament_selection(population, fitnesses, k=TOURNAMENT_K):
-    indices = np.random.randint(0, len(population), size=k)
-    best_idx = indices[0]
-    for idx in indices[1:]:
-        if fitnesses[idx] > fitnesses[best_idx]:
-            best_idx = idx
-    return deepcopy(population[best_idx])
+def gaussian_mutation(ind, sigma):
+    return ind + (np.random.randn(len(ind)) * sigma).astype(np.float32)
 
-
-def blx_alpha_crossover(parent1, parent2, alpha=0.5):
-    lower = np.minimum(parent1, parent2)
-    upper = np.maximum(parent1, parent2)
-    diff = upper - lower
-    low = lower - alpha * diff
-    high = upper + alpha * diff
-    child = np.random.uniform(low, high).astype(np.float32)
-    return child
-
-
-def gaussian_mutation(individual, sigma):
-    noise = np.random.randn(len(individual)).astype(np.float32) * sigma
-    return individual + noise
-
-
-def make_offspring(parents, fitnesses, num_offspring, current_sigma):
-    """Gera filhos com o sigma exato passado pelo loop principal."""
+def make_offspring(pop, fits, n_offspring, sigma):
     offspring = []
-    for _ in range(num_offspring):
-        p1 = tournament_selection(parents, fitnesses)
-        p2 = tournament_selection(parents, fitnesses)
-        
-        if np.random.rand() < CROSSOVER_PROB:
-            child = blx_alpha_crossover(p1, p2)
-        else:
-            child = deepcopy(p1)
-            
-        # MUTATION_PROB = 1.0: todos os filhos sofrem mutação
+    for _ in range(n_offspring):
+        p1 = tournament_selection(pop, fits)
+        p2 = tournament_selection(pop, fits)
+        child = blx_alpha_crossover(p1, p2) \
+                if np.random.rand() < CROSSOVER_PROB else deepcopy(p1)
         if np.random.rand() < MUTATION_PROB:
-            child = gaussian_mutation(child, sigma=current_sigma)
-            
+            child = gaussian_mutation(child, sigma)
         offspring.append(child)
     return offspring
 
-
-def survivor_selection_mu_plus_lambda(parents, parent_fits,
-                                      offspring, offspring_fits, mu):
-    combined = parents + offspring
-    combined_fits = np.concatenate([parent_fits, offspring_fits])
-    best_indices = np.argsort(-combined_fits)[:mu]
-    new_pop = [combined[i] for i in best_indices]
-    new_fits = combined_fits[best_indices]
+def survivor_selection(parents, p_fits, offspring, o_fits, mu, elites):
+    """μ+λ com elitismo explícito."""
+    combined      = parents + offspring
+    combined_fits = np.concatenate([p_fits, o_fits])
+    order         = np.argsort(-combined_fits)
+    new_pop  = [combined[i] for i in order[:mu]]
+    new_fits = combined_fits[order[:mu]].copy()
+    # Elitismo explícito: últimas posições reservadas
+    for rank, e in enumerate(elites):
+        new_pop[-(rank + 1)]  = deepcopy(e["ind"])
+        new_fits[-(rank + 1)] = e["fit"]
     return new_pop, new_fits
 
 
 # ---------------------------------------------------------------------------
-# 4. Main evolutionary loop
+# 5. Sigma adaptativo — 1/5 rule + restart por estagnação
+# ---------------------------------------------------------------------------
+def adapt_sigma(sigma, history, stagnant_gens):
+    if stagnant_gens >= STAGNATION_LIMIT:
+        print(f"  [SIGMA RESTART] {sigma:.4f} → {SIGMA_RESTART} "
+              f"(estagnado há {stagnant_gens} gens)")
+        return SIGMA_RESTART
+    if len(history) < WINDOW:
+        return sigma
+    rate = sum(history) / len(history)
+    if rate > SUCCESS_TARGET:
+        return min(sigma * ADAPT_FACTOR, SIGMA_MAX)
+    elif rate < SUCCESS_TARGET:
+        return max(sigma / ADAPT_FACTOR, SIGMA_MIN)
+    return sigma
+
+
+# ---------------------------------------------------------------------------
+# 6. Loop principal
 # ---------------------------------------------------------------------------
 def evolution_strategy(seed):
-    # 1) Discover genotype length
-    template_agent = MLPAgent()
-    num_params = len(template_agent.get_param_vector())
-    print(f"Genotype length (number of MLP parameters): {num_params}")
+    tag = "full" if MODE == "FULL" else "dev"
 
-    # 2) Initialise + evaluate
-    population = init_population(MU, num_params)
+    print(f"\n{'='*60}")
+    print(f"  MODE={MODE} | μ={MU} | λ={LAMBDA} | GEN={GENERATIONS}")
+    print(f"  N_TRAIN_SEEDS={N_TRAIN_SEEDS}/gen | pool=SEED_POOL[0..19] (rotativo)")
+    print(f"  N_ELITES={N_ELITES} | σ_init={SIGMA_INIT}")
+    print(f"  MLPAgent input: 107 features (+ vel_x, vel_y)")
+    print(f"  MoveForwardTask: stuck penalty activa")
+    print(f"{'='*60}\n")
+
+    n_params = len(MLPAgent().get_param_vector())
+    print(f"Genotype: {n_params} parameters")
+
+    pop  = init_population(MU, n_params)
     print("Evaluating initial population...")
-    fitnesses = evaluate_population(MLPAgent, population)
+    fits = evaluate_population(MLPAgent, pop, None)
+    print(f"Initial → best={fits.max():.2f}  mean={fits.mean():.2f}\n")
 
-    # 3) Best-of-run tracking
-    best_idx = int(np.argmax(fitnesses))
-    best_individual = deepcopy(population[best_idx])
-    best_reward = float(fitnesses[best_idx])
-    best_history = []
-    mean_history = []
-    min_history = []
-    std_history = []
+    best_idx = int(np.argmax(fits))
+    best_ind = deepcopy(pop[best_idx])
+    best_fit = float(fits[best_idx])
+    prev_best = best_fit
 
-    print(f"Initial best reward: {best_reward:.3f}")
-    print(f"Initial mean reward: {fitnesses.mean():.3f}")
+    sigma         = SIGMA_INIT
+    history       = deque(maxlen=WINDOW)
+    stagnant_gens = 0
+
+    best_h  = []
+    mean_h  = []
+    sigma_h = []
 
     Path("data/mlp_best_agents").mkdir(parents=True, exist_ok=True)
+    csv_path = f"data/mlp_best_agents/log_{tag}_seed_{seed}.csv"
 
-    # CSV log file - one row per generation, easy to plot in the report later
-    csv_path = f"data/mlp_best_agents/log_seed_{seed}.csv"
-    csv_file = open(csv_path, "w", newline="")
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["generation", "best", "mean", "min", "std",
-                         "best_of_run"])
+    with open(csv_path, "w", newline="") as cf:
+        cw = csv.writer(cf)
+        cw.writerow(["gen", "best_gen", "mean_gen", "min_gen",
+                     "std_gen", "best_run", "sigma", "stagnant_gens"])
 
-    # 4) Generation loop
-    for gen in range(GENERATIONS):
-        print(f"\n--- Generation {gen+1}/{GENERATIONS} ---")
+        for gen in range(GENERATIONS):
+            print(f"\n--- Gen {gen+1}/{GENERATIONS} | "
+                  f"σ={sigma:.4f} | stagnant={stagnant_gens} ---")
 
-        # Lógica da Escada de Mutação (de 125 em 125)
-        if gen < 100:
-            current_sigma = SIGMA_STAGE_1
-        elif gen < 200:
-            current_sigma = SIGMA_STAGE_2
-        elif gen < 350:
-            current_sigma = SIGMA_STAGE_3
-        else:
-            current_sigma = SIGMA_STAGE_4
+            # Elites
+            elite_order = np.argsort(-fits)[:N_ELITES]
+            elites = [{"ind": deepcopy(pop[i]), "fit": float(fits[i])}
+                      for i in elite_order]
+            print(f"  [ELITE] fit={elites[0]['fit']:.2f} → passa intacto")
 
-        print(f"[Sigma = {current_sigma}]")
+            # Offspring
+            offspring = make_offspring(pop, fits, LAMBDA, sigma)
+            with timer_context("Eval offspring"):
+                o_fits = evaluate_population(MLPAgent, offspring, None)
 
-        # 4.1 Generate offspring
-        offspring = make_offspring(population, fitnesses, LAMBDA, current_sigma)
+            # 1/5 rule
+            history.append(bool(o_fits.max() > float(fits.mean())))
 
-        # 4.2 Evaluate them
-        with timer_context("Evaluate offspring"):
-            offspring_fits = evaluate_population(MLPAgent, offspring)
+            # Survivor selection
+            pop, fits = survivor_selection(pop, fits, offspring, o_fits,
+                                           MU, elites)
 
-        # 4.3 Survivor selection (µ+λ)
-        population, fitnesses = survivor_selection_mu_plus_lambda(
-            population, fitnesses, offspring, offspring_fits, MU
-        )
+            # Best-of-run
+            gen_best = float(fits.max())
+            if gen_best > best_fit:
+                best_fit = gen_best
+                best_ind = deepcopy(pop[int(np.argmax(fits))])
+                fname = (f"data/mlp_best_agents/"
+                         f"es_{tag}_seed_{seed}_{best_fit:.3f}.pkl")
+                with open(fname, "wb") as f:
+                    pkl.dump(best_ind, f)
+                print(f"  >>> NEW BEST {best_fit:.3f} → {fname}")
 
-        # 4.4 Update best-of-run
-        gen_best_idx = int(np.argmax(fitnesses))
-        gen_best_reward = float(fitnesses[gen_best_idx])
-        if gen_best_reward > best_reward:
-            best_reward = gen_best_reward
-            best_individual = deepcopy(population[gen_best_idx])
-            fname = (f"data/mlp_best_agents/"
-                     f"es_seed_{seed}_{best_reward:.3f}.pkl")
-            with open(fname, 'wb') as f:
-                pkl.dump(best_individual, f)
-            print(f">>> New best! Saved to {fname}")
+            # Estagnação
+            if gen_best > prev_best:
+                stagnant_gens = 0
+            else:
+                stagnant_gens += 1
+            prev_best = gen_best
 
-        # 4.5 Detailed logging
-        mean_reward = float(fitnesses.mean())
-        min_reward = float(fitnesses.min())
-        std_reward = float(fitnesses.std())
+            # Sigma
+            sigma = adapt_sigma(sigma, history, stagnant_gens)
+            if stagnant_gens >= STAGNATION_LIMIT:
+                stagnant_gens = 0
 
-        print(
-            f"Gen {gen+1}: "
-            f"Best = {gen_best_reward:.2f} | "
-            f"Mean = {mean_reward:.2f} | "
-            f"Min = {min_reward:.2f} | "
-            f"Std = {std_reward:.2f} | "
-            f"Best-of-run = {best_reward:.2f}"
-        )
+            # Log
+            mean_r = float(fits.mean())
+            min_r  = float(fits.min())
+            std_r  = float(fits.std())
+            print(f"  best={gen_best:.2f} | mean={mean_r:.2f} | "
+                  f"min={min_r:.2f} | std={std_r:.2f} | "
+                  f"run_best={best_fit:.2f} | σ={sigma:.4f}")
 
-        best_history.append(gen_best_reward)
-        mean_history.append(mean_reward)
-        min_history.append(min_reward)
-        std_history.append(std_reward)
+            best_h.append(gen_best)
+            mean_h.append(mean_r)
+            sigma_h.append(sigma)
+            cw.writerow([gen+1, gen_best, mean_r, min_r,
+                         std_r, best_fit, sigma, stagnant_gens])
+            cf.flush()
 
-        # Append a row to the CSV for the report
-        csv_writer.writerow([gen + 1, gen_best_reward, mean_reward,
-                             min_reward, std_reward, best_reward])
-        csv_file.flush()
-
-    csv_file.close()
-
-    # 5) Final plot
-    make_evolution_plot(
-        best_history, mean_history,
-        title=f"ES_MLP_seed_{seed}", save=True
-    )
-
-    return best_individual, best_reward
+    make_evolution_plot(best_h, mean_h, sigma_h,
+                        title=f"ES_MLP_{tag}_seed_{seed}", save=True)
+    print(f"\n=== Finished. Best fitness = {best_fit:.3f} ===")
+    return best_ind, best_fit
 
 
 # ---------------------------------------------------------------------------
-# 5. Entry point
+# 7. Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python evolution.py <seed>")
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not positional:
+        print("Usage: python evolution.py <seed> [--full]")
         sys.exit(1)
 
-    seed = int(sys.argv[1])
+    seed = int(positional[0])
     np.random.seed(seed)
     torch.random.manual_seed(seed)
 
-    best_ind, best_fit = evolution_strategy(seed)
-    print(f"\n=== Final best fitness: {best_fit:.3f} ===")
+    print(f"Seed={seed} | Mode={MODE}")
+    evolution_strategy(seed)

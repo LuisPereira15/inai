@@ -22,37 +22,45 @@ class MLP(nn.Module):
 
 class MLPAgent(marioai.Agent):
     """
-    Input features (total = 105):
+    Input features (total = 107):
     ┌─────────────────────────────────────────────────────────────┐
     │ 1. Landscape 7x7  (49)  — blocos/obstáculos à volta        │
     │ 2. Enemy grid 7x7 (49)  — inimigos mapeados na mesma grelha│
     │ 3. Hole flags      (4)  — buracos à frente/atrás (1-2 cols)│
     │ 4. Boolean flags   (2)  — can_jump, on_ground              │
     │ 5. Mario mode      (1)  — 0=small,1=large,2=fire (norm.)   │
+    │ 6. Velocity        (2)  — vel_x, vel_y (delta de posição)  │
     │                   ────                                      │
-    │                   105  total                                │
+    │                   107  total                                │
     └─────────────────────────────────────────────────────────────┘
 
-    Porquê estas features?
-    - Landscape 7x7: visão local de obstáculos (paredes, blocos, etc.)
-    - Enemy grid 7x7: mesma grelha mas com 1 onde há inimigo → MLP vê
-      simultaneamente obstáculo E inimigo na mesma posição relativa
-    - Hole flags: colunas à frente/atrás sem chão → sinal direto de buraco
-    - can_jump / on_ground: estado físico de Mário
-    - mario_mode: sabe se pode disparar (2) ou se está vulnerável (0)
+    Velocity como delta de posição:
+      vel_x = mario_x_atual - mario_x_anterior  (normalizado por 16px/tile)
+      vel_y = mario_y_atual - mario_y_anterior  (normalizado por 16px/tile)
+
+    Porquê velocidade?
+      Sem vel, o MLP recebe input idêntico quando parado encostado a uma
+      parede e quando a andar — não consegue distinguir os dois estados
+      e nunca aprende a recuar para ganhar balanço.
+      Com vel_x < 0, o agente sabe que está a recuar.
+      Com vel_y > 0, o agente sabe que está a subir (saltou).
     """
 
-    HALF   = 3    # raio da janela → 7x7
-    CENTER = 11   # posição de Mário na grelha 22x22
+    HALF   = 3
+    CENTER = 11
 
     LANDSCAPE_DIM = (2 * HALF + 1) ** 2   # 49
     ENEMY_DIM     = (2 * HALF + 1) ** 2   # 49
     HOLE_DIM      = 4
     FLAGS_DIM     = 2
     MODE_DIM      = 1
+    VEL_DIM       = 2   # novo: vel_x, vel_y
 
-    INPUT_DIM  = LANDSCAPE_DIM + ENEMY_DIM + HOLE_DIM + FLAGS_DIM + MODE_DIM  # 105
+    INPUT_DIM  = LANDSCAPE_DIM + ENEMY_DIM + HOLE_DIM + FLAGS_DIM + MODE_DIM + VEL_DIM  # 107
     OUTPUT_DIM = 5   # [backward, forward, crouch, jump, speed/bombs]
+
+    # Normalização da velocidade: clip a [-VEL_CLIP, VEL_CLIP] tiles/step
+    VEL_CLIP = 3.0
 
     def __init__(self):
         super(MLPAgent, self).__init__()
@@ -60,15 +68,45 @@ class MLPAgent(marioai.Agent):
         self.output_dim  = self.OUTPUT_DIM
         self.mlp         = MLP(self.input_dim, self.output_dim)
         self.threshold   = 0.5
+        self.stochastic  = True   # True durante treino → amostragem probabilística
+                                  # False no eval → determinístico e reproduzível
         self._mario_mode = 0
+        self._prev_pos   = None   # posição no frame anterior (para delta)
+        self._vel_x      = 0.0   # velocidade calculada por delta
+        self._vel_y      = 0.0
 
     # ------------------------------------------------------------------
-    # sense(): guarda mario_mode que não está no Agent base
+    # sense(): actualiza velocidade por delta de posição
     # ------------------------------------------------------------------
     def sense(self, obs):
         super(MLPAgent, self).sense(obs)
         if not self.episode_over:
             self._mario_mode = getattr(obs, 'mario_mode', 0)
+
+            # Delta de posição → velocidade
+            current_pos = self.mario_floats  # (x, y) ou None
+            if current_pos is not None and self._prev_pos is not None:
+                # Normalizar por 16px (tamanho de 1 tile) e clipar
+                self._vel_x = float(np.clip(
+                    (current_pos[0] - self._prev_pos[0]) / 16.0,
+                    -self.VEL_CLIP, self.VEL_CLIP
+                ))
+                self._vel_y = float(np.clip(
+                    (current_pos[1] - self._prev_pos[1]) / 16.0,
+                    -self.VEL_CLIP, self.VEL_CLIP
+                ))
+            else:
+                self._vel_x = 0.0
+                self._vel_y = 0.0
+
+            self._prev_pos = current_pos
+
+    def new_episode(self):
+        """Reset estado interno no início de cada episódio."""
+        super(MLPAgent, self).new_episode()
+        self._prev_pos = None
+        self._vel_x    = 0.0
+        self._vel_y    = 0.0
 
     # ------------------------------------------------------------------
     # Feature extractors
@@ -82,11 +120,8 @@ class MLPAgent(marioai.Agent):
 
     def _enemy_grid_features(self):
         """
-        Mapeia inimigos (enemies_floats) numa grelha 7x7 relativa a Mário.
+        Mapeia inimigos numa grelha 7x7 relativa a Mário.
         Cada célula vale 1.0 se houver inimigo, 0.0 caso contrário.
-        enemies_floats: lista de tuplos (x, y, type) em coordenadas do mundo.
-        mario_floats: (mario_x, mario_y) em coordenadas do mundo.
-        Cada célula do mundo ≈ 16 píxeis.
         """
         size = 2 * self.HALF + 1
         grid = np.zeros((size, size), dtype=np.float32)
@@ -107,7 +142,6 @@ class MLPAgent(marioai.Agent):
     def _hole_features(self):
         """
         Deteta buracos nas 2 colunas à frente e 2 atrás de Mário.
-        Buraco = todas as células abaixo de Mário nessa coluna são 0.
         Retorna [atrás2, atrás1, frente1, frente2].
         """
         c = self.CENTER
@@ -128,6 +162,17 @@ class MLPAgent(marioai.Agent):
     def _mode_features(self):
         return np.array([self._mario_mode / 2.0], dtype=np.float32)
 
+    def _velocity_features(self):
+        """
+        vel_x e vel_y normalizados para [-1, 1] via clip de VEL_CLIP tiles/step.
+        vel_x > 0 → a avançar | vel_x < 0 → a recuar
+        vel_y > 0 → a descer  | vel_y < 0 → a subir (convenção y invertido)
+        """
+        return np.array([
+            self._vel_x / self.VEL_CLIP,
+            self._vel_y / self.VEL_CLIP
+        ], dtype=np.float32)
+
     # ------------------------------------------------------------------
     # act()
     # ------------------------------------------------------------------
@@ -140,15 +185,25 @@ class MLPAgent(marioai.Agent):
         holes     = self._hole_features()        # 4
         flags     = self._flags_features()       # 2
         mode      = self._mode_features()        # 1
+        velocity  = self._velocity_features()    # 2  ← novo
 
-        inputs = np.concatenate([landscape, enemies, holes, flags, mode])  # 105
+        inputs = np.concatenate([landscape, enemies, holes, flags, mode, velocity])  # 107
 
         input_tensor = torch.tensor(inputs, dtype=torch.float32)
         with torch.no_grad():
             output_tensor = self.mlp(input_tensor)
 
         action_probs = output_tensor.numpy()
-        action = (action_probs > self.threshold).astype(int).tolist()
+
+        if self.stochastic:
+            # Durante o treino: amostrar de Bernoulli(p)
+            # Permite explorar ações com baixa probabilidade (ex: jump=0.08)
+            # A evolução reforça as que resultam em progresso
+            action = (np.random.rand(len(action_probs)) < action_probs).astype(int).tolist()
+        else:
+            # No eval: determinístico e reproduzível
+            action = (action_probs > self.threshold).astype(int).tolist()
+
         return action
 
     # ------------------------------------------------------------------

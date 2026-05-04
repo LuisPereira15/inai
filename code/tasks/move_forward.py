@@ -31,14 +31,8 @@ class MoveForwardTask(marioai.Task):
         self.metric_distance = 0.0
         self.metric_kills = 0
         self.metric_steps = 0
-<<<<<<< Updated upstream
-        
-        # NOVO: Contador para saber há quanto tempo o Mario não avança
-        self.stuck_counter = 0 
-=======
         self.stuck_counter = 0
         self.max_x_reached = 0.0  # Progresso máximo alcançado no episódio
->>>>>>> Stashed changes
 
     def reset(self):
         """Called by the engine at the start of every new episode."""
@@ -67,18 +61,6 @@ class MoveForwardTask(marioai.Task):
 
         reward = 0.0
 
-<<<<<<< Updated upstream
-        # 1) Forward progress reward + distance metric
-        if current_obs.mario_pos is not None and last_obs.mario_pos is not None:
-            dx = current_obs.mario_pos[0] - last_obs.mario_pos[0]
-            reward += dx
-            
-            if current_obs.mario_pos[0] > self.metric_distance:
-                self.metric_distance = current_obs.mario_pos[0]
-
-            # NOVO: Lógica de penalização por ficar preso nas paredes/obstáculos
-            # Se o avanço for quase nulo ou negativo (andar para trás ou bater na parede)
-=======
         # 1) Leitura de Movimento (Eixo X e Eixo Y)
         if current_obs.mario_pos is not None and last_obs.mario_pos is not None:
             dx = current_obs.mario_pos[0] - last_obs.mario_pos[0]
@@ -108,23 +90,11 @@ class MoveForwardTask(marioai.Task):
             # Memorizamos se ele estava encravado antes de atualizar o contador
             estava_encravado = self.stuck_counter > 10
 
->>>>>>> Stashed changes
             if dx <= 0.1:
                 self.stuck_counter += 1
             else:
                 self.stuck_counter = 0 # Reset ao contador mal ele consiga avançar
 
-<<<<<<< Updated upstream
-            # Se o Mario estiver "encravado" há mais de 10 frames, aplicamos uma penalização
-            # Isto vai forçá-lo a explorar o salto para parar de sofrer esta penalização
-            if self.stuck_counter > 10:
-                reward -= 0.5
-
-        # 2) Tick penalty so being idle is discouraged
-        reward -= 0.05
-
-        # 3) Kill detection: compare enemy counts between steps
-=======
             # CASO 1: Ele continua encravado a bater na parede
             if self.stuck_counter > 10:
                 reward -= 2.0  # Dor forte para o obrigar a mudar de estratégia
@@ -148,28 +118,16 @@ class MoveForwardTask(marioai.Task):
         reward -= 0.02
 
         # 3) Kill detection (Apenas para métricas, SEM recompensa na Stage 1)
->>>>>>> Stashed changes
         enemies_now = count_enemies(current_obs.level_scene)
         enemies_before = count_enemies(last_obs.level_scene)
         if enemies_before > enemies_now:
             killed = enemies_before - enemies_now
             self.metric_kills += killed
-<<<<<<< Updated upstream
-            # NOVO: Faltava adicionar a recompensa por matar os inimigos!
-            reward += killed * 10.0 
-
-        # 4) Termination handling
-        if current_obs.status == 1:
-            reward += 1000.0
-        elif current_obs.status == 2:
-            reward -= 50.0
-=======
 
         # 4) Termination handling (Os Pilares do Projeto)
         if current_obs.status == 1:  # WIN
             reward += 1000.0
         elif current_obs.status == 2:  # DEATH
             reward -= 500.0
->>>>>>> Stashed changes
 
         return reward

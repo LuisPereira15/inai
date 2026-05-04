@@ -8,7 +8,7 @@ import numpy as np
 # Variable that configures the number of parallel processes
 N_PROCESSES = 5
 # Task Definition
-TASK_TO_SOLVE = MoveForwardTask#HunterTask
+TASK_TO_SOLVE = HunterTask
 
 
 

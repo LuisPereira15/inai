@@ -19,17 +19,17 @@ from evaluation import evaluate_population
 # ---------------------------------------------------------------------------
 MU = 15              # REDUZIDO: Apenas a elite absoluta sobrevive!
 LAMBDA = 50          # number of offspring generated per generation
-GENERATIONS = 500    # number of generations
+GENERATIONS = 200    # number of generations
 TOURNAMENT_K = 2     # tournament size for parent selection
 CROSSOVER_PROB = 0.7 # probability of applying crossover
 MUTATION_PROB = 1.0  # Todos os filhos sofrem mutação
 SIGMA_INIT = 0.5     # std-dev of the initial random weights
 
 # Escada de Mutação (Step Decay de 125 em 125 gerações)
-SIGMA_STAGE_1 = 0.5  # Gen 0 a 124 (Exploração Máxima)
-SIGMA_STAGE_2 = 0.35  # Gen 125 a 249 (Exploração Moderada)
-SIGMA_STAGE_3 = 0.20  # Gen 250 a 374 (Afinação Inicial)
-SIGMA_STAGE_4 = 0.05  # Gen 375 a 499 (Refinamento Cirúrgico)
+SIGMA_STAGE_1 = 0.1  # Gen 0 a 124 (Exploração Máxima)
+SIGMA_STAGE_2 = 0.07  # Gen 125 a 249 (Exploração Moderada)
+SIGMA_STAGE_3 = 0.03  # Gen 250 a 374 (Afinação Inicial)
+SIGMA_STAGE_4 = 0.01  # Gen 375 a 499 (Refinamento Cirúrgico)
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +133,31 @@ def evolution_strategy(seed):
     num_params = len(template_agent.get_param_vector())
     print(f"Genotype length (number of MLP parameters): {num_params}")
 
-    # 2) Initialise + evaluate
-    population = init_population(MU, num_params)
+    # =========================================================================
+    # TRANSFER LEARNING - INJETAR O CAMPEÃO DA STAGE 1
+    # =========================================================================
+    # IMPORTANTE: Coloca aqui o caminho e nome EXATO do teu melhor ficheiro .pkl!
+    CAMPEAO_STAGE_1 = "data/mlp_best_agents/es_seed_5_20954.920.pkl" 
+    
+    print(f"\n[TRANSFER LEARNING] A carregar o ADN base de: {CAMPEAO_STAGE_1}")
+    try:
+        with open(CAMPEAO_STAGE_1, 'rb') as f:
+            champion_dna = pkl.load(f)
+    except FileNotFoundError:
+        print(f"ERRO FATAL: Não encontrei o ficheiro {CAMPEAO_STAGE_1}!")
+        print("Muda a variável CAMPEAO_STAGE_1 no evolution.py para o nome correto.")
+        sys.exit(1)
+
+    # 2) Initialise population based on the Champion
+    population = []
+    for _ in range(MU):
+        # Criar clones do campeão com uma pequena mutação para começarem a explorar
+        clone = champion_dna + np.random.randn(num_params).astype(np.float32) * SIGMA_INIT
+        population.append(clone)
+
+    # GARANTIA DE SUCESSO: O 1º Mário é o campeão 100% inalterado!
+    population[0] = deepcopy(champion_dna)
+
     print("Evaluating initial population...")
     fitnesses = evaluate_population(MLPAgent, population)
 
@@ -164,11 +187,11 @@ def evolution_strategy(seed):
         print(f"\n--- Generation {gen+1}/{GENERATIONS} ---")
 
         # Lógica da Escada de Mutação (de 125 em 125)
-        if gen < 100:
+        if gen < 70:
             current_sigma = SIGMA_STAGE_1
-        elif gen < 200:
+        elif gen < 120:
             current_sigma = SIGMA_STAGE_2
-        elif gen < 350:
+        elif gen < 160:
             current_sigma = SIGMA_STAGE_3
         else:
             current_sigma = SIGMA_STAGE_4

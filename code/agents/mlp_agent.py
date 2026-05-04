@@ -8,9 +8,7 @@ class MLP(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(MLP, self).__init__()
         self.model = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
+            nn.Linear(input_dim, 32),
             nn.ReLU(),
             nn.Linear(32, output_dim),
             nn.Sigmoid()
@@ -42,7 +40,7 @@ class MLPAgent(marioai.Agent):
     - mario_mode: sabe se pode disparar (2) ou se está vulnerável (0)
     """
 
-    HALF   = 3    # raio da janela → 7x7
+    HALF   = 2    # raio da janela → 7x7
     CENTER = 11   # posição de Mário na grelha 22x22
 
     LANDSCAPE_DIM = (2 * HALF + 1) ** 2   # 49

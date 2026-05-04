@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 """
 Evolutionary Algorithm: (µ + λ) Evolution Strategy with elitism for the MLPAgent.
 
@@ -17,6 +18,8 @@ Usage:
 e.g. python evolution.py 1
 """
 
+=======
+>>>>>>> Stashed changes
 import sys
 import time
 import pickle as pkl
@@ -36,14 +39,28 @@ from evaluation import evaluate_population
 # ---------------------------------------------------------------------------
 # 1. Hyperparameters
 # ---------------------------------------------------------------------------
-MU = 50              # population size (parents kept each generation)
+MU = 15              # REDUZIDO: Apenas a elite absoluta sobrevive!
 LAMBDA = 50          # number of offspring generated per generation
+<<<<<<< Updated upstream
 GENERATIONS = 100    # number of generations
 TOURNAMENT_K = 3     # tournament size for parent selection
 CROSSOVER_PROB = 0.8 # probability of applying crossover
 MUTATION_PROB = 0.9  # probability of applying Gaussian mutation
 SIGMA_INIT = 0.5     # std-dev of the initial random weights
 SIGMA_MUT = 0.1      # std-dev of the Gaussian noise added by mutation
+=======
+GENERATIONS = 500    # number of generations
+TOURNAMENT_K = 2     # tournament size for parent selection
+CROSSOVER_PROB = 0.7 # probability of applying crossover
+MUTATION_PROB = 1.0  # Todos os filhos sofrem mutação
+SIGMA_INIT = 0.5     # std-dev of the initial random weights
+
+# Escada de Mutação (Step Decay de 125 em 125 gerações)
+SIGMA_STAGE_1 = 0.5  # Gen 0 a 124 (Exploração Máxima)
+SIGMA_STAGE_2 = 0.35  # Gen 125 a 249 (Exploração Moderada)
+SIGMA_STAGE_3 = 0.20  # Gen 250 a 374 (Afinação Inicial)
+SIGMA_STAGE_4 = 0.05  # Gen 375 a 499 (Refinamento Cirúrgico)
+>>>>>>> Stashed changes
 
 
 # ---------------------------------------------------------------------------
@@ -103,22 +120,36 @@ def blx_alpha_crossover(parent1, parent2, alpha=0.5):
     return child
 
 
-def gaussian_mutation(individual, sigma=SIGMA_MUT):
+def gaussian_mutation(individual, sigma):
     noise = np.random.randn(len(individual)).astype(np.float32) * sigma
     return individual + noise
 
 
+<<<<<<< Updated upstream
 def make_offspring(parents, fitnesses, num_offspring):
+=======
+def make_offspring(parents, fitnesses, num_offspring, current_sigma):
+    """Gera filhos com o sigma exato passado pelo loop principal."""
+>>>>>>> Stashed changes
     offspring = []
     for _ in range(num_offspring):
         p1 = tournament_selection(parents, fitnesses)
         p2 = tournament_selection(parents, fitnesses)
+        
         if np.random.rand() < CROSSOVER_PROB:
             child = blx_alpha_crossover(p1, p2)
         else:
             child = deepcopy(p1)
+<<<<<<< Updated upstream
         if np.random.rand() < MUTATION_PROB:
             child = gaussian_mutation(child)
+=======
+            
+        # MUTATION_PROB = 1.0: todos os filhos sofrem mutação
+        if np.random.rand() < MUTATION_PROB:
+            child = gaussian_mutation(child, sigma=current_sigma)
+            
+>>>>>>> Stashed changes
         offspring.append(child)
     return offspring
 
@@ -172,8 +203,25 @@ def evolution_strategy(seed):
     for gen in range(GENERATIONS):
         print(f"\n--- Generation {gen+1}/{GENERATIONS} ---")
 
+<<<<<<< Updated upstream
         # 4.1 Generate offspring
         offspring = make_offspring(population, fitnesses, LAMBDA)
+=======
+        # Lógica da Escada de Mutação (de 125 em 125)
+        if gen < 100:
+            current_sigma = SIGMA_STAGE_1
+        elif gen < 200:
+            current_sigma = SIGMA_STAGE_2
+        elif gen < 350:
+            current_sigma = SIGMA_STAGE_3
+        else:
+            current_sigma = SIGMA_STAGE_4
+
+        print(f"[Sigma = {current_sigma}]")
+
+        # 4.1 Generate offspring
+        offspring = make_offspring(population, fitnesses, LAMBDA, current_sigma)
+>>>>>>> Stashed changes
 
         # 4.2 Evaluate them
         with timer_context("Evaluate offspring"):

@@ -35,7 +35,7 @@ from tasks import MoveForwardTask, HunterTask
 TASK_CLASS = MoveForwardTask         # change to HunterTask for Stage 2
 DIFFICULTIES = [0, 3, 5, 10]         # same as the paper
 N_RUNS_PER_LEVEL = 30                # number of seeds per difficulty
-PORT = 4243                          # one of the ports docker exposes
+PORT = 4245                          # one of the ports docker exposes
 
 
 # ---------------------------------------------------------------------------

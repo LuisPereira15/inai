@@ -38,7 +38,7 @@ from evaluation import evaluate_population
 # ---------------------------------------------------------------------------
 MU = 30              # ALTERADO: era 50, população mais pequena converge melhor
 LAMBDA = 50          # mantido: mais offspring que pais favorece exploração
-GENERATIONS = 150    # ALTERADO: era 100, mais gerações para aproveitar melhor config
+GENERATIONS = 50    # ALTERADO: era 100, mais gerações para aproveitar melhor config
 TOURNAMENT_K = 5     # ALTERADO: era 3, pressão de seleção mais alta
 CROSSOVER_PROB = 0.8 # mantido
 MUTATION_PROB = 1.0  # mantido: todos os filhos sofrem mutação

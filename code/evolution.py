@@ -17,19 +17,19 @@ from evaluation import evaluate_population
 # ---------------------------------------------------------------------------
 # 1. Hyperparameters
 # ---------------------------------------------------------------------------
-MU = 15              # REDUZIDO: Apenas a elite absoluta sobrevive!
+MU = 15              # number of parents (elite survivors)
 LAMBDA = 50          # number of offspring generated per generation
 GENERATIONS = 100    # number of generations
 TOURNAMENT_K = 2     # tournament size for parent selection
 CROSSOVER_PROB = 0.7 # probability of applying crossover
-MUTATION_PROB = 1.0  # Todos os filhos sofrem mutação
+MUTATION_PROB = 1.0  # all offspring undergo mutation
 SIGMA_INIT = 0.5     # std-dev of the initial random weights
 
-# Escada de Mutação (Step Decay de 125 em 125 gerações)
-SIGMA_STAGE_1 = 0.5  # Gen 0 a 124 (Exploração Máxima)
-SIGMA_STAGE_2 = 0.35  # Gen 125 a 249 (Exploração Moderada)
-SIGMA_STAGE_3 = 0.20  # Gen 250 a 374 (Afinação Inicial)
-SIGMA_STAGE_4 = 0.05  # Gen 375 a 499 (Refinamento Cirúrgico)
+# Mutation Step Decay
+SIGMA_STAGE_1 = 0.5   # Gen 0  to 99  (Max Exploration)
+SIGMA_STAGE_2 = 0.35  # Gen 100 to 199 (Moderate Exploration)
+SIGMA_STAGE_3 = 0.20  # Gen 200 to 349 (Initial Tuning)
+SIGMA_STAGE_4 = 0.05  # Gen 350+       (Surgical Refinement)
 
 
 # ---------------------------------------------------------------------------
@@ -95,21 +95,19 @@ def gaussian_mutation(individual, sigma):
 
 
 def make_offspring(parents, fitnesses, num_offspring, current_sigma):
-    """Gera filhos com o sigma exato passado pelo loop principal."""
     offspring = []
     for _ in range(num_offspring):
         p1 = tournament_selection(parents, fitnesses)
         p2 = tournament_selection(parents, fitnesses)
-        
+
         if np.random.rand() < CROSSOVER_PROB:
             child = blx_alpha_crossover(p1, p2)
         else:
             child = deepcopy(p1)
-            
-        # MUTATION_PROB = 1.0: todos os filhos sofrem mutação
+
         if np.random.rand() < MUTATION_PROB:
             child = gaussian_mutation(child, sigma=current_sigma)
-            
+
         offspring.append(child)
     return offspring
 
@@ -133,12 +131,18 @@ def evolution_strategy(seed):
     num_params = len(template_agent.get_param_vector())
     print(f"Genotype length (number of MLP parameters): {num_params}")
 
-    # 2) Initialise + evaluate
+    # 2) Draw seeds for the initial evaluation
+    # Each generation gets 3 random seeds, shared across the whole population
+    # so all individuals are evaluated under the same conditions.
+    gen_seeds = np.random.randint(1, 1000, size=3).tolist()
+    print(f"Initial evaluation seeds: {gen_seeds}")
+
+    # 3) Initialise + evaluate
     population = init_population(MU, num_params)
     print("Evaluating initial population...")
-    fitnesses = evaluate_population(MLPAgent, population)
+    fitnesses = evaluate_population(MLPAgent, population, seeds=gen_seeds)
 
-    # 3) Best-of-run tracking
+    # 4) Best-of-run tracking
     best_idx = int(np.argmax(fitnesses))
     best_individual = deepcopy(population[best_idx])
     best_reward = float(fitnesses[best_idx])
@@ -152,18 +156,23 @@ def evolution_strategy(seed):
 
     Path("data/mlp_best_agents").mkdir(parents=True, exist_ok=True)
 
-    # CSV log file - one row per generation, easy to plot in the report later
     csv_path = f"data/mlp_best_agents/log_seed_{seed}.csv"
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["generation", "best", "mean", "min", "std",
-                         "best_of_run"])
+                         "best_of_run", "gen_seeds"])
 
-    # 4) Generation loop
+    # 5) Generation loop
     for gen in range(GENERATIONS):
         print(f"\n--- Generation {gen+1}/{GENERATIONS} ---")
 
-        # Lógica da Escada de Mutação (de 125 em 125)
+        # Draw 3 new random seeds for this generation.
+        # All individuals in this generation are evaluated on the same 3 seeds,
+        # ensuring fair comparison while varying across generations.
+        gen_seeds = np.random.randint(1, 1000, size=3).tolist()
+        print(f"Generation seeds: {gen_seeds}")
+
+        # Sigma schedule
         if gen < 100:
             current_sigma = SIGMA_STAGE_1
         elif gen < 200:
@@ -175,19 +184,24 @@ def evolution_strategy(seed):
 
         print(f"[Sigma = {current_sigma}]")
 
-        # 4.1 Generate offspring
+        # 5.1 Generate offspring
         offspring = make_offspring(population, fitnesses, LAMBDA, current_sigma)
 
-        # 4.2 Evaluate them
+        # 5.2 Evaluate offspring
         with timer_context("Evaluate offspring"):
-            offspring_fits = evaluate_population(MLPAgent, offspring)
+            offspring_fits = evaluate_population(MLPAgent, offspring, seeds=gen_seeds)
 
-        # 4.3 Survivor selection (µ+λ)
+        # 5.3 Survivor selection (µ+λ)
         population, fitnesses = survivor_selection_mu_plus_lambda(
             population, fitnesses, offspring, offspring_fits, MU
         )
 
-        # 4.4 Update best-of-run
+        # 5.4 Elitism: guarantee the best-of-run champion enters next generation
+        # untouched, regardless of what survivor selection picked.
+        population[0] = deepcopy(best_individual)
+        fitnesses[0] = best_reward
+
+        # 5.5 Update best-of-run
         gen_best_idx = int(np.argmax(fitnesses))
         gen_best_reward = float(fitnesses[gen_best_idx])
         if gen_best_reward > best_reward:
@@ -199,7 +213,7 @@ def evolution_strategy(seed):
                 pkl.dump(best_individual, f)
             print(f">>> New best! Saved to {fname}")
 
-        # 4.5 Detailed logging
+        # 5.6 Logging
         mean_reward = float(fitnesses.mean())
         min_reward = float(fitnesses.min())
         std_reward = float(fitnesses.std())
@@ -218,14 +232,14 @@ def evolution_strategy(seed):
         min_history.append(min_reward)
         std_history.append(std_reward)
 
-        # Append a row to the CSV for the report
         csv_writer.writerow([gen + 1, gen_best_reward, mean_reward,
-                             min_reward, std_reward, best_reward])
+                             min_reward, std_reward, best_reward,
+                             str(gen_seeds)])
         csv_file.flush()
 
     csv_file.close()
 
-    # 5) Final plot
+    # 6) Final plot
     make_evolution_plot(
         best_history, mean_history,
         title=f"ES_MLP_seed_{seed}", save=True

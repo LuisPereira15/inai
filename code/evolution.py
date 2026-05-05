@@ -19,7 +19,7 @@ from evaluation import evaluate_population
 # ---------------------------------------------------------------------------
 MU = 15              # REDUZIDO: Apenas a elite absoluta sobrevive!
 LAMBDA = 50          # number of offspring generated per generation
-GENERATIONS = 500    # number of generations
+GENERATIONS = 100    # number of generations
 TOURNAMENT_K = 2     # tournament size for parent selection
 CROSSOVER_PROB = 0.7 # probability of applying crossover
 MUTATION_PROB = 1.0  # Todos os filhos sofrem mutação

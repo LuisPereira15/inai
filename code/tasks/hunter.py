@@ -1,23 +1,26 @@
 """
 HunterTask - Reward function for STAGE 2: Combat Optimization.
-
-O Foco Absoluto: Eliminação de inimigos, multi-kills, e recolha de Power-Ups.
+Foco: Eliminação de inimigos, multi-kills, recolha de Power-Ups 
+e navegação tática de obstáculos com balanço consistente.
 """
 
 import numpy as np
 import marioai
 
-# Enemy codes inside the level_scene grid
-ENEMY_CODES = {2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13}
+# Categorização dos Inimigos por Risco
+TIER_1_ENEMIES = {2}           # Goomba
+TIER_2_ENEMIES = {3, 4, 5, 6}  # Koopas
+TIER_3_ENEMIES = {7, 8, 9, 10, 12, 13} # Spikys, Piranhas
 
-def count_enemies(scene):
-    """Count how many cells of the 22x22 grid contain an enemy code."""
+def count_enemies_by_tier(scene):
     if scene is None:
-        return 0
-    count = 0
-    for code in ENEMY_CODES:
-        count += int(np.sum(scene == code))
-    return count
+        return {1: 0, 2: 0, 3: 0}
+    
+    counts = {1: 0, 2: 0, 3: 0}
+    for code in TIER_1_ENEMIES: counts[1] += int(np.sum(scene == code))
+    for code in TIER_2_ENEMIES: counts[2] += int(np.sum(scene == code))
+    for code in TIER_3_ENEMIES: counts[3] += int(np.sum(scene == code))
+    return counts
 
 class HunterTask(marioai.Task):
     def __init__(self, *args, **kwargs):
@@ -26,14 +29,14 @@ class HunterTask(marioai.Task):
         self._reset_metrics()
 
     def _reset_metrics(self):
-        """Reset all per-episode statistics."""
         self.metric_distance = 0.0
         self.metric_kills = 0
         self.metric_steps = 0
         self.stuck_counter = 0
+        self.max_x_reached = 0.0
+        self.momentum_authorized = False
 
     def reset(self):
-        """Called by the engine at the start of every new episode."""
         super().reset()
         self._reset_metrics()
 
@@ -48,82 +51,95 @@ class HunterTask(marioai.Task):
         }
 
     def compute_reward(self, current_obs, last_obs):
-        """Compute the per-step reward AND update per-episode metrics."""
         self.metric_steps += 1
 
-        if last_obs is None:
+        
+        if last_obs is None or current_obs.mario_pos is None or last_obs.mario_pos is None:
             return 0.0
 
         reward = 0.0
 
         # -------------------------------------------------------------
-        # 1. MOVIMENTO (Baixa Prioridade - Mantém o Mário a avançar devagar)
+        # 1. MOVIMENTO (Lógica de Compromisso de Balanço)
         # -------------------------------------------------------------
-        if current_obs.mario_pos is not None and last_obs.mario_pos is not None:
-            dx = current_obs.mario_pos[0] - last_obs.mario_pos[0]
-            dy = last_obs.mario_pos[1] - current_obs.mario_pos[1]
-            
-            # Recompensa muito menor (0.5). O objetivo já não é o speedrun!
-            reward += 0.5 * dx 
-            if current_obs.mario_pos[0] > self.metric_distance:
-                self.metric_distance = current_obs.mario_pos[0]
-
-            # Fuga de bloqueios básica (herdada e simplificada da Stage 1)
-            if dx <= 0.1:
-                self.stuck_counter += 1
-            else:
-                self.stuck_counter = 0
-
-            if self.stuck_counter > 20:
-                reward -= 1.0  # Pressão para não ficar acampado
-                if dy > 0 and dx > 0:
-                    reward += 5.0
-                    self.stuck_counter -= 10
-
-        # -------------------------------------------------------------
-        # 2. INSTINTO PREDADOR (O Coração da Stage 2)
-        # -------------------------------------------------------------
-        enemies_now = count_enemies(current_obs.level_scene)
-        enemies_before = count_enemies(last_obs.level_scene)
+        dx = current_obs.mario_pos[0] - last_obs.mario_pos[0]
+        current_x = current_obs.mario_pos[0]
         
-        if enemies_before > enemies_now:
-            killed = enemies_before - enemies_now
-            self.metric_kills += killed
+        # Recompensa de Desbravador: O prémio por bater o recorde de distância no nível
+        if current_x > self.max_x_reached:
+            reward += (current_x - self.max_x_reached) * 5.0 # Peso aumentado para encorajar progresso
+            self.max_x_reached = current_x
+            self.metric_distance = current_x
+
+        # SISTEMA ANTI-INDECISÃO
+        if abs(dx) <= 0.1:
+            self.stuck_counter += 1
+        else:
+            if self.momentum_authorized and dx < -0.1:
+                reward += abs(dx) * 2.5 # Torna o recuo "lucrativo" temporariamente
             
-            # Recompensa Base por Matar
-            base_kill_reward = 75.0 * killed
+            # Se ele já está a correr para a frente com velocidade após o balanço
+            if dx > 0.5:
+                self.momentum_authorized = False # Objetivo de balanço cumprido
             
-            # MULTI-KILL BONUS: Se matar > 1 de uma vez (Carapaça ou Super Estrela)
-            # Ganha um extra substancial para incentivar combos!
-            multi_kill_bonus = 50.0 * (killed - 1) if killed > 1 else 0.0
-            
-            reward += base_kill_reward + multi_kill_bonus
+            self.stuck_counter = 0
+
+        # Ativação do Balanço: Se falhou o salto durante 15 frames, tem de recuar
+        if self.stuck_counter > 15:
+            self.momentum_authorized = True
+            reward += 10.0 # Bónus por "perceber" a estratégia
+
+        # Recompensa normal de avanço (só se não estiver em "modo recuo")
+        if not self.momentum_authorized:
+            reward += 1.3 * dx
+            if dx < -0.1: # Penalização por recuar sem ter tentado saltar primeiro
+                reward -= 5.0 
+
+        # Penalização por inércia total (ficar a beijar o cano sem se mexer)
+        if self.stuck_counter > 40:
+            reward -= 2.0
 
         # -------------------------------------------------------------
-        # 3. GESTÃO DE ARMAMENTO (Power-ups: O segredo para caçar)
+        # 2. INSTINTO PREDADOR (Kills por Tier e Multi-Kills)
         # -------------------------------------------------------------
-        # mario_mode: 0 = Small, 1 = Big, 2 = Fire
+        enemies_now = count_enemies_by_tier(current_obs.level_scene)
+        enemies_before = count_enemies_by_tier(last_obs.level_scene)
+        
+        total_killed = 0
+        # Recompensas atualizadas conforme sugerido para o relatório [cite: 1]
+        pts_map = {1: 300.0, 2: 700.0, 3: 2000.0} 
+
+        for tier in [1, 2, 3]:
+            if enemies_before[tier] > enemies_now[tier]:
+                killed = enemies_before[tier] - enemies_now[tier]
+                total_killed += killed
+                reward += pts_map[tier] * killed
+
+        if total_killed > 0:
+            self.metric_kills += total_killed
+            # BÓNUS DE MULTI-KILL: Bónus massivo por matar vários de uma vez (ex: carapaça)
+            if total_killed > 1:
+                reward += 60000.0 * (total_killed - 1)
+
+        # -------------------------------------------------------------
+        # 3. GESTÃO DE POWER-UPS
+        # -------------------------------------------------------------
         mode_now = getattr(current_obs, 'mario_mode', 0)
         mode_before = getattr(last_obs, 'mario_mode', 0)
         
         if mode_now > mode_before:
-            # Recompensa massiva por evoluir para Big ou Fire!
-            # Ensina-o a bater nos blocos ? e a apanhar os itens.
-            reward += 100.0  
+            reward += 15000.0  
         elif mode_now < mode_before:
-            # PUNIÇÃO AGRESSIVA por levar dano! 
-            # Ensina-o a usar a Flor de Fogo à distância em vez de se atirar para o perigo.
-            reward -= 30.0
+            reward -= 500.0
 
         # -------------------------------------------------------------
-        # 4. Tick Penalty & Término
+        # 4. PENALIZAÇÕES E VITÓRIA
         # -------------------------------------------------------------
-        # Penalização por frame continua a existir para forçar a exploração
-        reward -= 0.05
+        reward -= 0.05 # Tick penalty
 
         if current_obs.status == 1:  # WIN
-            reward += 500.0  # Chegar ao fim ainda é o prémio máximo
+            reward += 15000.0  
         elif current_obs.status == 2:  # DEATH
-            reward -= 100.0  # A morte é má, mas menos penalizadora que na Stage 1 para o encorajar a correr riscos de combate
+            reward -= 500.0  
 
         return reward

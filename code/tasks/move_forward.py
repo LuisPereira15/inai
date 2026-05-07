@@ -77,8 +77,7 @@ class MoveForwardTask(marioai.Task):
                 self.max_x_reached = current_x
                 self.metric_distance = current_x
 
-            # -------------------------------------------------------------
-            # A "TAXA DE SALTO" (Evita o Mário "Canguru")
+            
             # -------------------------------------------------------------
             # Se está a correr rápido e livre (dx > 0.5) e salta sem razão:
             if dy > 0 and dx > 0.5:

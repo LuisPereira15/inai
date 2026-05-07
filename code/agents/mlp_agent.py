@@ -19,26 +19,7 @@ class MLP(nn.Module):
 
 
 class MLPAgent(marioai.Agent):
-    """
-    Input features (total = 105):
-    ┌─────────────────────────────────────────────────────────────┐
-    │ 1. Landscape 7x7  (49)  — blocos/obstáculos à volta        │
-    │ 2. Enemy grid 7x7 (49)  — inimigos mapeados na mesma grelha│
-    │ 3. Hole flags      (4)  — buracos à frente/atrás (1-2 cols)│
-    │ 4. Boolean flags   (2)  — can_jump, on_ground              │
-    │ 5. Mario mode      (1)  — 0=small,1=large,2=fire (norm.)   │
-    │                   ────                                      │
-    │                   105  total                                │
-    └─────────────────────────────────────────────────────────────┘
-
-    Porquê estas features?
-    - Landscape 7x7: visão local de obstáculos (paredes, blocos, etc.)
-    - Enemy grid 7x7: mesma grelha mas com 1 onde há inimigo → MLP vê
-      simultaneamente obstáculo E inimigo na mesma posição relativa
-    - Hole flags: colunas à frente/atrás sem chão → sinal direto de buraco
-    - can_jump / on_ground: estado físico de Mário
-    - mario_mode: sabe se pode disparar (2) ou se está vulnerável (0)
-    """
+    
 
     HALF   = 2    # raio da janela → 7x7
     CENTER = 11   # posição de Mário na grelha 22x22
@@ -147,6 +128,13 @@ class MLPAgent(marioai.Agent):
 
         action_probs = output_tensor.numpy()
         action = (action_probs > self.threshold).astype(int).tolist()
+
+        if action[0] == 1 and action[1] == 1:
+            action[0] = 0  # Larga a tecla de Trás
+
+        # 2. Se carregar Baixo e Salto ao mesmo tempo -> Prioriza o Salto!
+        if action[2] == 1 and action[3] == 1:
+            action[2] = 0
         return action
 
     # ------------------------------------------------------------------

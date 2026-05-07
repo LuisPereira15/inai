@@ -19,17 +19,17 @@ from evaluation import evaluate_population
 # ---------------------------------------------------------------------------
 MU = 15              # REDUZIDO: Apenas a elite absoluta sobrevive!
 LAMBDA = 50          # number of offspring generated per generation
-GENERATIONS = 200    # number of generations
+GENERATIONS = 100    # number of generations
 TOURNAMENT_K = 2     # tournament size for parent selection
 CROSSOVER_PROB = 0.7 # probability of applying crossover
 MUTATION_PROB = 1.0  # Todos os filhos sofrem mutação
 SIGMA_INIT = 0.5     # std-dev of the initial random weights
 
 # Escada de Mutação (Step Decay de 125 em 125 gerações)
-SIGMA_STAGE_1 = 0.1  # Gen 0 a 124 (Exploração Máxima)
-SIGMA_STAGE_2 = 0.07  # Gen 125 a 249 (Exploração Moderada)
-SIGMA_STAGE_3 = 0.03  # Gen 250 a 374 (Afinação Inicial)
-SIGMA_STAGE_4 = 0.01  # Gen 375 a 499 (Refinamento Cirúrgico)
+SIGMA_STAGE_1 = 0.25  # Gen 0 a 124 (Exploração Máxima)
+SIGMA_STAGE_2 = 0.20  # Gen 125 a 249 (Exploração )
+SIGMA_STAGE_3 = 0.10  # Gen 250 a 374 (Afinação )
+SIGMA_STAGE_4 = 0.05  # Gen 375 a 499 (Refinamento )
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +135,6 @@ def evolution_strategy(seed):
 
     # =========================================================================
     # TRANSFER LEARNING - INJETAR O CAMPEÃO DA STAGE 1
-    # =========================================================================
-    # IMPORTANTE: Coloca aqui o caminho e nome EXATO do teu melhor ficheiro .pkl!
     CAMPEAO_STAGE_1 = "data/mlp_best_agents/es_seed_5_20954.920.pkl" 
     
     print(f"\n[TRANSFER LEARNING] A carregar o ADN base de: {CAMPEAO_STAGE_1}")
@@ -187,11 +185,11 @@ def evolution_strategy(seed):
         print(f"\n--- Generation {gen+1}/{GENERATIONS} ---")
 
         # Lógica da Escada de Mutação (de 125 em 125)
-        if gen < 70:
+        if gen < 45:
             current_sigma = SIGMA_STAGE_1
-        elif gen < 120:
+        elif gen < 75:
             current_sigma = SIGMA_STAGE_2
-        elif gen < 160:
+        elif gen < 90:
             current_sigma = SIGMA_STAGE_3
         else:
             current_sigma = SIGMA_STAGE_4
